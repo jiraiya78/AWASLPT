@@ -13,23 +13,20 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="icon" href="icons/icon-192.png" type="image/png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <link rel="stylesheet" href="css/styles.css?v=6" />
+  <link rel="stylesheet" href="css/styles.css?v=9" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">A</span>
-        <div>
+        <div class="brand-text">
           <strong>AWAS Alert</strong>
           <small id="statusLine">Ready</small>
         </div>
       </div>
       <div class="top-actions">
-        <button type="button" id="btnInstall" class="btn install-btn hidden" title="Install app">Install</button>
-        <button type="button" id="btnDest" class="btn" title="Set destination">Dest</button>
-        <button type="button" id="btnTrack" class="btn primary" title="Start GPS tracking">Track</button>
-        <button type="button" id="btnDemo" class="btn" title="Simulate a drive">Demo</button>
+        <button type="button" id="btnDest" class="btn primary" title="Search destination">Search</button>
         <button type="button" id="btnMenu" class="btn icon" aria-label="Menu">☰</button>
       </div>
     </header>
@@ -60,6 +57,13 @@
         <button type="submit" class="btn primary">Search</button>
         <button type="button" id="btnCloseSearch" class="btn icon" aria-label="Close search">✕</button>
       </form>
+      <div id="recentBlock" class="recent-block">
+        <div class="recent-head">
+          <strong>Recent</strong>
+          <button type="button" id="btnClearRecent" class="btn ghost recent-clear">Clear</button>
+        </div>
+        <ul id="recentList" class="search-results recent-list"></ul>
+      </div>
       <ul id="searchResults" class="search-results"></ul>
       <p class="muted search-hint">Or tap the map to drop a destination pin. Powered by OpenStreetMap Nominatim.</p>
     </section>
@@ -102,7 +106,7 @@
         <strong id="demoSpeedLabel">90 km/h</strong>
         <button type="button" id="btnSpeedUp" class="btn icon" aria-label="Faster">+</button>
       </div>
-      <p class="hint" id="hintLine">Search Dest, start Track, or open the menu for cameras on your route.</p>
+      <p class="hint" id="hintLine">GPS tracks automatically. Tap Search for a destination.</p>
     </section>
 
     <aside id="drawer" class="drawer" aria-hidden="true">
@@ -115,6 +119,10 @@
         <h3>App</h3>
         <button type="button" id="btnInstallMenu" class="btn primary">Install on this device</button>
         <p id="installHint" class="muted">Adds AWAS Alert to your Android home screen (Chrome).</p>
+        <div class="btn-row">
+          <button type="button" id="btnDemo" class="btn">Start demo drive</button>
+        </div>
+        <p class="muted">Simulates driving along your route (or toward the nearest camera).</p>
       </div>
 
       <div class="drawer-section">
@@ -193,6 +201,6 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script type="module" src="js/app.js?v=7"></script>
+  <script type="module" src="js/app.js?v=9"></script>
 </body>
 </html>

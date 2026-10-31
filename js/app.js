@@ -66,11 +66,9 @@ const el = {
   cacheStatus: document.getElementById("cacheStatus"),
   drawer: document.getElementById("drawer"),
   scrim: document.getElementById("drawerScrim"),
-  btnTrack: document.getElementById("btnTrack"),
   btnDemo: document.getElementById("btnDemo"),
   btnDest: document.getElementById("btnDest"),
   btnFollow: document.getElementById("btnFollow"),
-  btnInstall: document.getElementById("btnInstall"),
   btnInstallMenu: document.getElementById("btnInstallMenu"),
   installHint: document.getElementById("installHint"),
   btnCacheRoute: document.getElementById("btnCacheRoute"),
@@ -80,6 +78,8 @@ const el = {
   searchForm: document.getElementById("searchForm"),
   searchInput: document.getElementById("searchInput"),
   searchResults: document.getElementById("searchResults"),
+  recentBlock: document.getElementById("recentBlock"),
+  recentList: document.getElementById("recentList"),
   demoSpeedBar: document.getElementById("demoSpeedBar"),
   demoSpeedLabel: document.getElementById("demoSpeedLabel"),
 };
@@ -114,6 +114,7 @@ const state = {
   accuracyCircle: null,
   suppressFollowUntil: 0,
   deferredInstall: null,
+  recentSearches: [],
   offRouteHits: 0,
   lastRerouteAt: 0,
   rerouting: false,
@@ -198,7 +199,7 @@ function setFollow(on, recenter = true) {
 
 function centerOnCar() {
   if (!state.position) {
-    el.hint.textContent = "No position yet — start Track or Demo first.";
+    el.hint.textContent = "No position yet — waiting for GPS, or use Demo in the menu.";
     return;
   }
   setFollow(true, true);
@@ -254,14 +255,67 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+const MAX_RECENT = 8;
+
 function openSearch(open) {
   el.searchPanel.classList.toggle("hidden", !open);
   if (open) {
     el.routePicker.classList.add("hidden");
     openDrawer(false);
-    setTimeout(() => el.searchInput.focus(), 50);
-  } else {
     el.searchResults.innerHTML = "";
+    renderRecentSearches();
+    setTimeout(() => el.searchInput.focus(), 50);
+  }
+}
+
+function placeKey(place) {
+  return `${place.lat.toFixed(5)},${place.lng.toFixed(5)}`;
+}
+
+async function rememberSearch(place) {
+  if (!place || !Number.isFinite(place.lat) || !Number.isFinite(place.lng)) return;
+  const entry = {
+    name: place.name || `Pin ${place.lat.toFixed(4)}, ${place.lng.toFixed(4)}`,
+    lat: place.lat,
+    lng: place.lng,
+    at: Date.now(),
+  };
+  const key = placeKey(entry);
+  state.recentSearches = [
+    entry,
+    ...state.recentSearches.filter((r) => placeKey(r) !== key),
+  ].slice(0, MAX_RECENT);
+  await setMeta("recentSearches", state.recentSearches);
+  renderRecentSearches();
+}
+
+function renderRecentSearches() {
+  const list = el.recentList;
+  if (!list) return;
+  list.innerHTML = "";
+  const items = state.recentSearches || [];
+  if (!items.length) {
+    el.recentBlock.classList.add("hidden");
+    return;
+  }
+  el.recentBlock.classList.remove("hidden");
+  for (const place of items) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.innerHTML = `${escapeHtml(place.name)}<span class="meta">${place.lat.toFixed(5)}, ${place.lng.toFixed(5)}</span>`;
+    btn.addEventListener("click", async () => {
+      openSearch(false);
+      state.destMode = false;
+      el.btnDest.classList.remove("active");
+      await setDestination({
+        lat: place.lat,
+        lng: place.lng,
+        name: place.name,
+      });
+    });
+    li.appendChild(btn);
+    list.appendChild(li);
   }
 }
 
@@ -276,7 +330,7 @@ function setDestMode(on) {
     openSearch(false);
     if (!el.routeMode.checked) {
       el.hint.textContent =
-        "Search Dest, start Track, or open the menu for cameras on your route.";
+        "GPS tracks automatically. Tap Search for a destination.";
     }
   }
 }
@@ -286,7 +340,10 @@ async function onMapClick(e) {
 
   if (state.destMode) {
     setDestMode(false);
-    await setDestination(point);
+    await setDestination({
+      ...point,
+      name: `Map pin ${point.lat.toFixed(4)}, ${point.lng.toFixed(4)}`,
+    });
     return;
   }
 
@@ -344,6 +401,7 @@ async function setDestination(dest) {
     el.hint.textContent = "Pick a route option, or keep the recommended one.";
   }
   await setMeta("destination", dest);
+  await rememberSearch(dest);
 }
 
 /** Always returns ≥1 route (OSRM with snap, else straight). */
@@ -845,20 +903,20 @@ function userStopAlert() {
 function startTracking() {
   if (!navigator.geolocation) {
     setStatus("Geolocation unavailable");
-    alert("This browser does not support GPS / geolocation.");
+    el.hint.textContent =
+      "This browser has no GPS. Use HTTPS on a phone, or try Demo from the menu.";
     return;
   }
-  stopDemo();
   if (state.watchId != null) return;
+  if (state.demoActive) return;
 
   setStatus("Acquiring GPS…");
-  el.btnTrack.classList.add("active");
-  el.btnTrack.textContent = "Tracking";
   state.tracking = true;
   setFollow(true, false);
 
   state.watchId = navigator.geolocation.watchPosition(
     (pos) => {
+      if (state.demoActive) return;
       applyPosition(
         {
           lat: pos.coords.latitude,
@@ -877,7 +935,7 @@ function startTracking() {
     (err) => {
       setStatus(`GPS error: ${err.message}`);
       el.hint.textContent =
-        "Allow location permission, or use Demo mode / HTTPS (required on phones).";
+        "Allow location permission (required). Demo is available in the menu.";
     },
     {
       enableHighAccuracy: true,
@@ -893,8 +951,6 @@ function stopTracking() {
     state.watchId = null;
   }
   state.tracking = false;
-  el.btnTrack.classList.remove("active");
-  el.btnTrack.textContent = "Track";
 }
 
 function demoSpeedMps() {
@@ -916,10 +972,22 @@ function adjustDemoSpeed(deltaKmh) {
   setMeta("demoSpeedKmh", state.demoSpeedKmh);
 }
 
+function syncDemoButton() {
+  if (!el.btnDemo) return;
+  if (state.demoActive) {
+    el.btnDemo.classList.add("active");
+    el.btnDemo.textContent = "Stop demo drive";
+  } else {
+    el.btnDemo.classList.remove("active");
+    el.btnDemo.textContent = "Start demo drive";
+  }
+}
+
 async function startDemo() {
   stopTracking();
-  stopDemo();
+  stopDemo({ resumeGps: false });
   state.alertSilenced = false;
+  openDrawer(false);
 
   if (!state.cameras.length) {
     state.cameras = LPT_CAMERAS.map((c) => ({ ...c }));
@@ -959,8 +1027,7 @@ async function startDemo() {
   };
 
   state.demoActive = true;
-  el.btnDemo.classList.add("active");
-  el.btnDemo.textContent = "Stop demo";
+  syncDemoButton();
   setDemoSpeedVisible(true);
   setStatus("Demo on route");
   el.hint.textContent =
@@ -973,7 +1040,7 @@ async function startDemo() {
   state.demoTimer = setInterval(() => {
     const poly = state.demoPath;
     if (!poly || poly.length < 2) {
-      stopDemo(false);
+      stopDemo();
       return;
     }
     const stepM = demoSpeedMps() * (tickMs / 1000);
@@ -984,7 +1051,7 @@ async function startDemo() {
       state.demoPos
     );
     if (!advanced) {
-      stopDemo(false);
+      stopDemo();
       return;
     }
     state.demoPathIndex = advanced.index;
@@ -1000,8 +1067,8 @@ async function startDemo() {
     );
     if (advanced.arrived) {
       setStatus("Demo arrived at destination");
-      el.hint.textContent = "Reached destination — tap Demo to replay.";
-      stopDemo(false);
+      el.hint.textContent = "Reached destination — open menu to replay Demo.";
+      stopDemo();
     }
   }, tickMs);
 }
@@ -1016,8 +1083,7 @@ function startDemoTowardCamera() {
   state.demoPos = { lat: start.lat, lng: start.lng };
   state.demoPath = null;
   state.demoActive = true;
-  el.btnDemo.classList.add("active");
-  el.btnDemo.textContent = "Stop demo";
+  syncDemoButton();
   setDemoSpeedVisible(true);
   setStatus("Demo drive");
   setFollow(true, false);
@@ -1045,22 +1111,23 @@ function startDemoTowardCamera() {
       demoSpeedMps()
     );
     if (nearest.distance < 40) {
-      setStatus("Demo arrived — tap Demo to replay");
-      stopDemo(false);
+      setStatus("Demo arrived — open menu to replay");
+      stopDemo();
     }
   }, tickMs);
 }
 
-function stopDemo(resetBtn = true) {
+function stopDemo({ resumeGps = true } = {}) {
   if (state.demoTimer) {
     clearInterval(state.demoTimer);
     state.demoTimer = null;
   }
+  const wasDemo = state.demoActive;
   state.demoActive = false;
   state.demoPath = null;
   setDemoSpeedVisible(false);
-  el.btnDemo.classList.remove("active");
-  el.btnDemo.textContent = "Demo";
+  syncDemoButton();
+  if (wasDemo && resumeGps) startTracking();
 }
 
 async function cacheCurrentRoute() {
@@ -1110,14 +1177,14 @@ function setupInstallPrompt() {
   window.addEventListener("beforeinstallprompt", (e) => {
     e.preventDefault();
     state.deferredInstall = e;
-    el.btnInstall.classList.remove("hidden");
+    el.btnInstallMenu.classList.add("install-ready");
     el.installHint.textContent =
-      "Ready to install — tap Install to add AWAS Alert to your home screen.";
+      "Ready to install — tap the button above to add AWAS Alert to your home screen.";
   });
 
   window.addEventListener("appinstalled", () => {
     state.deferredInstall = null;
-    el.btnInstall.classList.add("hidden");
+    el.btnInstallMenu.classList.remove("install-ready");
     el.installHint.textContent = "Installed. Open AWAS Alert from your home screen.";
     setStatus("App installed");
   });
@@ -1131,31 +1198,33 @@ function setupInstallPrompt() {
       state.deferredInstall.prompt();
       const choice = await state.deferredInstall.userChoice;
       state.deferredInstall = null;
-      el.btnInstall.classList.add("hidden");
+      el.btnInstallMenu.classList.remove("install-ready");
       if (choice.outcome === "accepted") setStatus("Installing…");
       return;
     }
     alert(
-      "Install not available yet.\n\nOn Android Chrome:\n1) Open this site over HTTPS (GitHub Pages)\n2) Use Chrome menu → Install app / Add to Home screen\n\nOr wait until the Install button appears after the first visit."
+      "Install not available yet.\n\nOn Android Chrome:\n1) Open this site over HTTPS (GitHub Pages)\n2) Use Chrome menu → Install app / Add to Home screen\n\nOr open ☰ after the first visit when install is ready."
     );
   };
 
-  el.btnInstall.addEventListener("click", triggerInstall);
   el.btnInstallMenu.addEventListener("click", triggerInstall);
 
   if (window.matchMedia("(display-mode: standalone)").matches) {
-    el.btnInstall.classList.add("hidden");
+    el.btnInstallMenu.classList.remove("install-ready");
     el.installHint.textContent = "Running as installed app.";
   }
 }
 
 async function runDestinationSearch(query) {
   el.searchResults.innerHTML = '<li class="muted">Searching…</li>';
+  el.recentBlock.classList.add("hidden");
   try {
     const results = await searchPlaces(query);
     el.searchResults.innerHTML = "";
     if (!results.length) {
-      el.searchResults.innerHTML = '<li class="muted">No places found. Try another name or tap the map.</li>';
+      el.searchResults.innerHTML =
+        '<li class="muted">No places found. Try another name, a recent place, or tap the map.</li>';
+      renderRecentSearches();
       return;
     }
     for (const place of results) {
@@ -1178,6 +1247,7 @@ async function runDestinationSearch(query) {
     }
   } catch (err) {
     el.searchResults.innerHTML = `<li class="muted">Search failed: ${escapeHtml(err.message)}</li>`;
+    renderRecentSearches();
   }
 }
 
@@ -1198,6 +1268,11 @@ function wireUi() {
     ev.preventDefault();
     runDestinationSearch(el.searchInput.value);
   });
+  document.getElementById("btnClearRecent").addEventListener("click", async () => {
+    state.recentSearches = [];
+    await setMeta("recentSearches", []);
+    renderRecentSearches();
+  });
 
   document.getElementById("btnClearNav").addEventListener("click", clearNavigation);
   document.getElementById("btnCloseRoutes").addEventListener("click", () => {
@@ -1207,20 +1282,11 @@ function wireUi() {
   document.getElementById("btnStopAlert").addEventListener("click", userStopAlert);
   document.getElementById("btnStopAlertMenu").addEventListener("click", userStopAlert);
 
-  el.btnTrack.addEventListener("click", () => {
-    if (state.tracking) {
-      stopTracking();
-      setStatus("Tracking stopped");
-    } else {
-      startTracking();
-    }
-  });
-
   el.btnDemo.addEventListener("click", () => {
     if (state.demoActive) {
       stopDemo();
       stopAlertSound();
-      setStatus("Demo stopped");
+      setStatus("Demo stopped — GPS resumed");
     } else {
       startDemo();
     }
@@ -1236,7 +1302,7 @@ function wireUi() {
   document.getElementById("btnAddHere").addEventListener("click", async () => {
     const place = state.position;
     if (!place) {
-      alert("Start Track or Demo first so we know your location.");
+      alert("Waiting for GPS fix — allow location permission, or run Demo from the menu.");
       return;
     }
     state.cameras.push({
@@ -1284,7 +1350,7 @@ function wireUi() {
       el.hint.textContent = "Manual corridor: tap start, then end on the map.";
     } else {
       el.hint.textContent =
-        "Search Dest, start Track, or open the menu for cameras on your route.";
+        "GPS tracks automatically. Tap Search for a destination.";
     }
   });
 
@@ -1374,6 +1440,9 @@ async function boot() {
   state.demoSpeedKmh = Number(demoKmh) || DEFAULT_DEMO_KMH;
   updateDemoSpeedLabel();
 
+  const recent = await getMeta("recentSearches", []);
+  state.recentSearches = Array.isArray(recent) ? recent : [];
+
   const route = await getMeta("route", []);
   if (Array.isArray(route) && route.length) {
     state.routePoints = route;
@@ -1406,6 +1475,9 @@ async function boot() {
   setStatus(navigator.onLine ? "Online" : "Offline");
   window.addEventListener("online", () => setStatus("Online"));
   window.addEventListener("offline", () => setStatus("Offline — using cache"));
+
+  // Always track GPS (no Track button)
+  startTracking();
 }
 
 boot();
