@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="description" content="AWAS Alert — proximity warnings for traffic cameras along your route" />
+  <title>AWAS Alert</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="icon" href="icons/icon-192.png" type="image/png" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="css/styles.css?v=6" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div>
+          <strong>AWAS Alert</strong>
+          <small id="statusLine">Ready</small>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button type="button" id="btnInstall" class="btn install-btn hidden" title="Install app">Install</button>
+        <button type="button" id="btnDest" class="btn" title="Set destination">Dest</button>
+        <button type="button" id="btnTrack" class="btn primary" title="Start GPS tracking">Track</button>
+        <button type="button" id="btnDemo" class="btn" title="Simulate a drive">Demo</button>
+        <button type="button" id="btnMenu" class="btn icon" aria-label="Menu">☰</button>
+      </div>
+    </header>
+
+    <main id="map" role="application" aria-label="Map"></main>
+
+    <button type="button" id="btnFollow" class="map-fab follow-fab active" title="Center on car / follow" aria-label="Center and follow" aria-pressed="true">
+      <span aria-hidden="true">⌖</span>
+    </button>
+
+    <section id="alertBanner" class="alert-banner hidden" aria-live="assertive">
+      <div class="alert-pulse"></div>
+      <div class="alert-copy">
+        <strong id="alertTitle">AWAS ahead</strong>
+        <span id="alertSub">—</span>
+      </div>
+      <button type="button" id="btnStopAlert" class="btn stop-alert">Stop alert</button>
+    </section>
+
+    <section id="searchPanel" class="search-panel hidden" aria-label="Destination search">
+      <form id="searchForm" class="search-form" autocomplete="off">
+        <input
+          type="search"
+          id="searchInput"
+          placeholder="Search destination (e.g. Kuantan, KTCC…)"
+          enterkeyhint="search"
+        />
+        <button type="submit" class="btn primary">Search</button>
+        <button type="button" id="btnCloseSearch" class="btn icon" aria-label="Close search">✕</button>
+      </form>
+      <ul id="searchResults" class="search-results"></ul>
+      <p class="muted search-hint">Or tap the map to drop a destination pin. Powered by OpenStreetMap Nominatim.</p>
+    </section>
+
+    <section id="routePicker" class="route-picker hidden" aria-label="Route options">
+      <div class="route-picker-head">
+        <strong>Choose a route</strong>
+        <button type="button" id="btnCloseRoutes" class="btn icon" aria-label="Close routes">✕</button>
+      </div>
+      <div id="routeOptions" class="route-options"></div>
+    </section>
+
+    <section class="hud" aria-label="Driving info">
+      <div class="hud-row">
+        <div class="stat">
+          <span class="label">Next cam</span>
+          <span class="value" id="nextDist">—</span>
+        </div>
+        <div class="stat">
+          <span class="label">ETA</span>
+          <span class="value" id="nextEta">—</span>
+        </div>
+        <div class="stat">
+          <span class="label">Speed</span>
+          <span class="value" id="speedVal">—</span>
+        </div>
+      </div>
+      <div class="proximity">
+        <div class="proximity-meta">
+          <span id="proximityLabel">Proximity</span>
+          <span id="proximityPct">0%</span>
+        </div>
+        <div class="bar-track" aria-hidden="true">
+          <div id="proximityBar" class="bar-fill level-far"></div>
+        </div>
+      </div>
+      <div id="demoSpeedBar" class="demo-speed hidden">
+        <span class="label">Demo speed</span>
+        <button type="button" id="btnSpeedDown" class="btn icon" aria-label="Slower">−</button>
+        <strong id="demoSpeedLabel">90 km/h</strong>
+        <button type="button" id="btnSpeedUp" class="btn icon" aria-label="Faster">+</button>
+      </div>
+      <p class="hint" id="hintLine">Search Dest, start Track, or open the menu for cameras on your route.</p>
+    </section>
+
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <h2>Cameras &amp; offline</h2>
+        <button type="button" id="btnCloseDrawer" class="btn icon" aria-label="Close">✕</button>
+      </div>
+
+      <div class="drawer-section">
+        <h3>App</h3>
+        <button type="button" id="btnInstallMenu" class="btn primary">Install on this device</button>
+        <p id="installHint" class="muted">Adds AWAS Alert to your Android home screen (Chrome).</p>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Navigation</h3>
+        <p id="navInfo" class="muted">No destination set.</p>
+        <div class="btn-row">
+          <button type="button" id="btnSetDest" class="btn primary">Search destination</button>
+          <button type="button" id="btnClearNav" class="btn ghost">Clear nav</button>
+        </div>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Cameras on route <span id="routeCamCount" class="badge">0</span></h3>
+        <p id="routeCamEmpty" class="muted">Set a destination and choose a route to see AWAS cameras along it.</p>
+        <ul id="routeCamList" class="cam-list route-cam-list"></ul>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Alert</h3>
+        <label class="field">
+          <span>Warn within</span>
+          <div class="inline">
+            <input type="number" id="alertRadiusKm" min="0.2" max="5" step="0.1" value="2" />
+            <span>km</span>
+          </div>
+        </label>
+        <label class="field">
+          <span>Alert volume <span id="volumeLabel">70%</span></span>
+          <input type="range" id="alertVolume" min="0" max="100" value="70" />
+        </label>
+        <button type="button" id="btnStopAlertMenu" class="btn danger ghost">Stop alert sound</button>
+      </div>
+
+      <div class="drawer-section">
+        <h3>All AWAS cameras <span id="camCount" class="badge">0</span></h3>
+        <ul id="camList" class="cam-list"></ul>
+        <div class="btn-row">
+          <button type="button" id="btnAddHere" class="btn">Add at my location</button>
+          <button type="button" id="btnResetCams" class="btn">Reset to LPT list</button>
+        </div>
+        <button type="button" id="btnClearCams" class="btn danger ghost">Clear all cameras</button>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Offline route cache</h3>
+        <p class="muted">Caches map tiles along your selected navigation route (or a manual corridor).</p>
+        <label class="field check">
+          <input type="checkbox" id="routeMode" />
+          <span>Manual corridor (tap map: start → end)</span>
+        </label>
+        <p id="routeInfo" class="muted">No route set.</p>
+        <div class="btn-row">
+          <button type="button" id="btnCacheRoute" class="btn primary" disabled>Cache route offline</button>
+          <button type="button" id="btnClearRoute" class="btn ghost">Clear corridor</button>
+        </div>
+        <div id="cacheProgress" class="cache-progress hidden">
+          <div class="bar-track"><div id="cacheBar" class="bar-fill level-mid"></div></div>
+          <span id="cacheStatus">Idle</span>
+        </div>
+      </div>
+
+      <div class="drawer-section">
+        <h3>Export / import</h3>
+        <div class="btn-row">
+          <button type="button" id="btnExport" class="btn">Export cameras JSON</button>
+          <label class="btn file-btn">
+            Import JSON
+            <input type="file" id="btnImport" accept="application/json,.json" hidden />
+          </label>
+        </div>
+      </div>
+
+      <p class="fineprint">Prototype for personal awareness only. Drive safely — do not interact with the phone while driving. Map © OpenStreetMap · routing via OSRM · search via Nominatim.</p>
+    </aside>
+    <div id="drawerScrim" class="scrim hidden"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script type="module" src="js/app.js?v=7"></script>
+</body>
+</html>
