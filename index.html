@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="icon" href="icons/icon-192.png" type="image/png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <link rel="stylesheet" href="css/styles.css?v=9" />
+  <link rel="stylesheet" href="css/styles.css?v=12" />
 </head>
 <body>
   <div id="app">
@@ -26,7 +26,8 @@
         </div>
       </div>
       <div class="top-actions">
-        <button type="button" id="btnDest" class="btn primary" title="Search destination">Search</button>
+        <button type="button" id="btnDest" class="btn" title="Search destination">Search</button>
+        <button type="button" id="btnRoutes" class="btn primary" title="Route options">Route</button>
         <button type="button" id="btnMenu" class="btn icon" aria-label="Menu">☰</button>
       </div>
     </header>
@@ -73,7 +74,11 @@
         <strong>Choose a route</strong>
         <button type="button" id="btnCloseRoutes" class="btn icon" aria-label="Close routes">✕</button>
       </div>
+      <p class="muted route-picker-hint">Tap a route to preview it on the map, then press OK.</p>
       <div id="routeOptions" class="route-options"></div>
+      <div class="route-picker-actions">
+        <button type="button" id="btnConfirmRoute" class="btn primary" disabled>OK — use this route</button>
+      </div>
     </section>
 
     <section class="hud" aria-label="Driving info">
@@ -130,6 +135,7 @@
         <p id="navInfo" class="muted">No destination set.</p>
         <div class="btn-row">
           <button type="button" id="btnSetDest" class="btn primary">Search destination</button>
+          <button type="button" id="btnRoutesMenu" class="btn">Route options</button>
           <button type="button" id="btnClearNav" class="btn ghost">Clear nav</button>
         </div>
       </div>
@@ -201,6 +207,6 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script type="module" src="js/app.js?v=9"></script>
+  <script type="module" src="js/app.js?v=12"></script>
 </body>
 </html>

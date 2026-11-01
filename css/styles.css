@@ -298,6 +298,16 @@ body {
   background: rgba(3, 105, 161, 0.35);
 }
 .route-option small { display: block; color: var(--muted); margin-top: 2px; }
+.route-picker-hint { margin: 0 0 8px; font-size: 0.78rem; }
+.route-picker-actions {
+  margin-top: 10px;
+  display: grid;
+}
+.route-picker-actions .btn {
+  width: 100%;
+  border-radius: 12px;
+  padding: 0.7rem 1rem;
+}
 
 .field input[type="range"] {
   width: 100%;
@@ -522,7 +532,8 @@ body {
   .hud { padding: 12px; }
   .brand strong { font-size: 0.85rem; }
   .brand-mark { width: 28px; height: 28px; border-radius: 8px; }
-  .top-actions .btn:not(.icon) { padding: 0.45rem 0.7rem; font-size: 0.8rem; }
+  .top-actions .btn:not(.icon) { padding: 0.4rem 0.55rem; font-size: 0.75rem; }
+  .brand strong { max-width: 7.5rem; }
   .btn.icon { width: 36px; height: 36px; }
   .alert-banner {
     top: 58px;

@@ -68,12 +68,14 @@ const el = {
   scrim: document.getElementById("drawerScrim"),
   btnDemo: document.getElementById("btnDemo"),
   btnDest: document.getElementById("btnDest"),
+  btnRoutes: document.getElementById("btnRoutes"),
   btnFollow: document.getElementById("btnFollow"),
   btnInstallMenu: document.getElementById("btnInstallMenu"),
   installHint: document.getElementById("installHint"),
   btnCacheRoute: document.getElementById("btnCacheRoute"),
   routePicker: document.getElementById("routePicker"),
   routeOptions: document.getElementById("routeOptions"),
+  btnConfirmRoute: document.getElementById("btnConfirmRoute"),
   searchPanel: document.getElementById("searchPanel"),
   searchForm: document.getElementById("searchForm"),
   searchInput: document.getElementById("searchInput"),
@@ -123,6 +125,10 @@ const state = {
   demoPathIndex: 0,
   demoPath: null, // dedicated copy so demo keeps moving even if route object changes
   demoPos: null,
+  wakeLock: null,
+  targetZoom: null,
+  lastZoomAt: 0,
+  pendingRoute: null, // previewed but not confirmed
 };
 
 function setStatus(text) {
@@ -166,6 +172,8 @@ function initMap() {
   state.map = L.map("map", {
     zoomControl: false,
     attributionControl: true,
+    zoomSnap: 0.25,
+    zoomDelta: 0.5,
   }).setView([4.2, 103.1], 8);
 
   L.control.zoom({ position: "bottomright" }).addTo(state.map);
@@ -191,7 +199,10 @@ function setFollow(on, recenter = true) {
   el.btnFollow.setAttribute("aria-pressed", on ? "true" : "false");
   if (on && recenter && state.position) {
     state.suppressFollowUntil = Date.now() + 400;
-    state.map.setView([state.position.lat, state.position.lng], Math.max(state.map.getZoom(), 14), {
+    const zoom = zoomForSpeed(state.position.speed);
+    state.targetZoom = zoom;
+    state.lastZoomAt = Date.now();
+    state.map.setView([state.position.lat, state.position.lng], zoom, {
       animate: true,
     });
   }
@@ -371,6 +382,13 @@ async function onMapClick(e) {
 async function setDestination(dest) {
   state.destination = dest;
   state.offRouteHits = 0;
+  state.selectedRoute = null;
+  state.pendingRoute = null;
+  clearAltLayers();
+  if (state.navLine) {
+    state.map.removeLayer(state.navLine);
+    state.navLine = null;
+  }
   if (state.destMarker) state.map.removeLayer(state.destMarker);
   state.destMarker = L.marker([dest.lat, dest.lng], { icon: destIcon() }).addTo(
     state.map
@@ -392,16 +410,11 @@ async function setDestination(dest) {
 
   const routes = await loadRouteOptions(origin, dest);
   state.routeAlternatives = routes;
-  showRouteOptions(routes);
-  previewAlternatives(routes);
-  // Always ensure a usable route — auto-pick recommended (user can still switch)
-  selectRoute(routes[0], { quiet: routes.length > 1 });
-  if (routes.length > 1) {
-    el.routePicker.classList.remove("hidden");
-    el.hint.textContent = "Pick a route option, or keep the recommended one.";
-  }
   await setMeta("destination", dest);
+  await setMeta("selectedRoute", null);
   await rememberSearch(dest);
+  openRoutePicker(routes);
+  el.hint.textContent = "Preview a route, then tap OK to confirm.";
 }
 
 /** Always returns ≥1 route (OSRM with snap, else straight). */
@@ -416,17 +429,93 @@ async function loadRouteOptions(origin, destination, vias = []) {
   return straightRoute(origin, destination);
 }
 
-function showRouteOptions(routes) {
+function closeRoutePicker() {
+  el.routePicker.classList.add("hidden");
+  state.pendingRoute = null;
+  if (el.btnConfirmRoute) el.btnConfirmRoute.disabled = true;
+}
+
+function openRoutePicker(routes) {
+  if (!routes?.length) return;
+  state.routeAlternatives = routes;
+  openSearch(false);
+  openDrawer(false);
   el.routePicker.classList.remove("hidden");
   el.routeOptions.innerHTML = "";
   routes.forEach((route, i) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "route-option" + (i === 0 ? " selected" : "");
+    btn.dataset.routeId = route.id;
     btn.innerHTML = `${escapeHtml(route.summary)}`;
-    btn.addEventListener("click", () => selectRoute(route));
+    btn.addEventListener("click", () => previewRouteChoice(route));
     el.routeOptions.appendChild(btn);
   });
+  previewRouteChoice(routes[0]);
+  el.hint.textContent = "Preview a route, then tap OK to confirm.";
+}
+
+function previewRouteChoice(route) {
+  state.pendingRoute = route;
+  el.btnConfirmRoute.disabled = false;
+  document.querySelectorAll(".route-option").forEach((btn) => {
+    btn.classList.toggle("selected", btn.dataset.routeId === route.id);
+  });
+
+  // Keep committed nav line dim if present; highlight preview
+  clearAltLayers();
+  if (state.navLine) {
+    state.navLine.setStyle({ opacity: 0.25, weight: 3 });
+  }
+
+  const routes = state.routeAlternatives || [route];
+  routes.forEach((r) => {
+    const selected = r.id === route.id;
+    const latlngs = r.points.map((p) => [p.lat, p.lng]);
+    const line = L.polyline(latlngs, {
+      color: selected ? "#38bdf8" : "#64748b",
+      weight: selected ? 6 : 3,
+      opacity: selected ? 0.95 : 0.35,
+      dashArray: selected ? null : "6 8",
+    }).addTo(state.map);
+    state.altRouteLayers.push(line);
+  });
+
+  const latlngs = route.points.map((p) => [p.lat, p.lng]);
+  if (latlngs.length) {
+    state.map.fitBounds(L.latLngBounds(latlngs), { padding: [48, 48] });
+    setFollow(false);
+  }
+  setStatus("Previewing route");
+}
+
+function confirmPendingRoute() {
+  if (!state.pendingRoute) return;
+  const route = state.pendingRoute;
+  selectRoute(route, { fromReroute: false });
+  closeRoutePicker();
+  setFollow(true, true);
+}
+
+async function openRoutesPanel() {
+  openDrawer(false);
+  openSearch(false);
+
+  if (!state.destination) {
+    setStatus("Set a destination first");
+    el.hint.textContent = "Search a destination, then use Route to pick a path.";
+    setDestMode(true);
+    return;
+  }
+
+  setStatus("Loading routes…");
+  el.hint.textContent = "Fetching route options…";
+  const origin = state.position || {
+    lat: state.map.getCenter().lat,
+    lng: state.map.getCenter().lng,
+  };
+  const routes = await loadRouteOptions(origin, state.destination);
+  openRoutePicker(routes);
 }
 
 function previewAlternatives(routes) {
@@ -458,6 +547,7 @@ function clearAltLayers() {
 function selectRoute(route, opts = {}) {
   const { quiet = false, fromReroute = false } = opts;
   state.selectedRoute = route;
+  state.pendingRoute = null;
   state.offRouteHits = 0;
   clearAltLayers();
   if (state.navLine) {
@@ -481,12 +571,12 @@ function selectRoute(route, opts = {}) {
     : "Destination";
   el.navInfo.textContent = `${fromReroute ? "Rerouted · " : ""}${destName} — ${route.summary}`;
   el.routeInfo.textContent = `Nav route ready to cache (${route.points.length} pts).`;
-  if (!quiet) el.routePicker.classList.add("hidden");
-  setStatus(fromReroute ? "Rerouted" : "Route selected");
+  if (!quiet) closeRoutePicker();
+  setStatus(fromReroute ? "Rerouted" : "Route confirmed");
   if (!quiet) {
     el.hint.textContent = fromReroute
       ? "Back on a new route from your current path."
-      : "Route set. Open menu → Cameras on route for the list.";
+      : "Route confirmed. Open menu → Cameras on route for the list.";
   }
 
   // If demo is running, keep it on the new geometry from nearest point forward
@@ -607,7 +697,7 @@ function clearNavigation() {
     state.map.removeLayer(state.destMarker);
     state.destMarker = null;
   }
-  el.routePicker.classList.add("hidden");
+  closeRoutePicker();
   el.navInfo.textContent = "No destination set.";
   setMeta("destination", null);
   setMeta("selectedRoute", null);
@@ -679,8 +769,60 @@ function updateUserMarker(pos) {
 
   if (state.follow) {
     state.suppressFollowUntil = Date.now() + 250;
-    state.map.panTo(latlng, { animate: true, duration: 0.35 });
+    const zoom = zoomForSpeed(pos.speed);
+    const now = Date.now();
+    const prev = state.targetZoom;
+    const zoomChanged = prev == null || Math.abs(zoom - prev) >= 0.25;
+    // Zoom in quickly when slowing (intersections); zoom out more gently
+    const zoomingIn = prev != null && zoom > prev;
+    const throttleMs = zoomingIn ? 700 : 1400;
+    if (zoomChanged && now - state.lastZoomAt > throttleMs) {
+      state.targetZoom = zoom;
+      state.lastZoomAt = now;
+      state.map.setView(latlng, zoom, { animate: true, duration: zoomingIn ? 0.45 : 0.7 });
+    } else {
+      state.map.panTo(latlng, { animate: true, duration: 0.35 });
+    }
   }
+}
+
+/**
+ * Speed-based zoom while navigating.
+ * Slow → close (road / intersections); fast → only a bit wider (never too far out).
+ * Range ~18 (stopped) → ~15 (highway).
+ */
+function zoomForSpeed(speedMps) {
+  const kmh = Math.max(0, (speedMps || 0) * 3.6);
+  // 0 km/h → 18.0, 40 → 17.0, 70 → 16.25, 100 → 15.5, 120+ → 15.0
+  const t = Math.min(kmh, 120) / 120;
+  const zoom = 18 - t * 3;
+  return Math.round(zoom * 4) / 4;
+}
+
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  try {
+    if (state.wakeLock) return;
+    state.wakeLock = await navigator.wakeLock.request("screen");
+    state.wakeLock.addEventListener("release", () => {
+      state.wakeLock = null;
+    });
+  } catch (err) {
+    console.warn("Wake Lock unavailable:", err.message);
+  }
+}
+
+function setupWakeLock() {
+  requestWakeLock();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") requestWakeLock();
+  });
+  // Some browsers drop the lock after idle; refresh periodically while page is open
+  setInterval(() => {
+    if (document.visibilityState === "visible" && !state.wakeLock) {
+      requestWakeLock();
+    }
+  }, 30000);
 }
 
 function applyPosition(fix, reportedSpeed = null) {
@@ -744,13 +886,9 @@ async function rerouteFromCurrent(statusMsg = "Rerouting…") {
   try {
     const routes = await loadRouteOptions(origin, state.destination, vias);
     state.routeAlternatives = routes;
-    // Auto-apply best; briefly offer alternatives if several
-    selectRoute(routes[0], { fromReroute: true, quiet: routes.length > 1 });
-    if (routes.length > 1) {
-      showRouteOptions(routes);
-      previewAlternatives(routes);
-      el.hint.textContent = "Rerouted. You can pick another option if you prefer.";
-    }
+    // Auto-apply best on derail; user can open Route anytime to change
+    selectRoute(routes[0], { fromReroute: true });
+    el.hint.textContent = "Rerouted. Tap Route to preview other options.";
   } catch (err) {
     console.warn(err);
     setStatus("Reroute failed");
@@ -1259,6 +1397,11 @@ function wireUi() {
   el.btnFollow.addEventListener("click", () => centerOnCar());
 
   el.btnDest.addEventListener("click", () => setDestMode(!state.destMode));
+  el.btnRoutes.addEventListener("click", () => openRoutesPanel());
+  document.getElementById("btnRoutesMenu").addEventListener("click", () => {
+    openDrawer(false);
+    openRoutesPanel();
+  });
   document.getElementById("btnSetDest").addEventListener("click", () => {
     openDrawer(false);
     setDestMode(true);
@@ -1276,8 +1419,15 @@ function wireUi() {
 
   document.getElementById("btnClearNav").addEventListener("click", clearNavigation);
   document.getElementById("btnCloseRoutes").addEventListener("click", () => {
-    el.routePicker.classList.add("hidden");
+    closeRoutePicker();
+    // Restore committed route styling if any
+    if (state.navLine) state.navLine.setStyle({ opacity: 0.9, weight: 5 });
+    clearAltLayers();
+    el.hint.textContent = state.selectedRoute
+      ? "Kept current route. Tap Route anytime to change."
+      : "No route confirmed yet.";
   });
+  el.btnConfirmRoute.addEventListener("click", () => confirmPendingRoute());
 
   document.getElementById("btnStopAlert").addEventListener("click", userStopAlert);
   document.getElementById("btnStopAlertMenu").addEventListener("click", userStopAlert);
@@ -1478,6 +1628,43 @@ async function boot() {
 
   // Always track GPS (no Track button)
   startTracking();
+  setupWakeLock();
+  setupBackButton();
+}
+
+/** Keep the web app open on Android/browser Back — close panels first, never exit. */
+function setupBackButton() {
+  const pushGuard = () => {
+    try {
+      history.pushState({ awas: true }, "", location.href);
+    } catch {
+      /* ignore */
+    }
+  };
+  pushGuard();
+  pushGuard();
+
+  window.addEventListener("popstate", () => {
+    // Re-arm so the next Back also stays in-app
+    pushGuard();
+
+    if (el.drawer.classList.contains("open")) {
+      openDrawer(false);
+      return;
+    }
+    if (!el.searchPanel.classList.contains("hidden")) {
+      setDestMode(false);
+      return;
+    }
+    if (!el.routePicker.classList.contains("hidden")) {
+      closeRoutePicker();
+      if (state.navLine) state.navLine.setStyle({ opacity: 0.9, weight: 5 });
+      clearAltLayers();
+      return;
+    }
+    // Nothing to close — stay on the map (do not leave the app)
+    setStatus("Press Home to leave the app");
+  });
 }
 
 boot();
