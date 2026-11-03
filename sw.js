@@ -1,5 +1,5 @@
 /* AWAS Alert service worker — caches app shell + serves offline map tiles */
-const APP_CACHE = "awas-app-v4";
+const APP_CACHE = "awas-app-v11";
 const TILE_CACHE = "awas-tiles-v1";
 
 const SHELL = [
@@ -12,6 +12,7 @@ const SHELL = [
   "./js/offline.js",
   "./js/routing.js",
   "./js/search.js",
+  "./js/audio.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

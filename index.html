@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="icon" href="icons/icon-192.png" type="image/png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <link rel="stylesheet" href="css/styles.css?v=12" />
+  <link rel="stylesheet" href="css/styles.css?v=19" />
 </head>
 <body>
   <div id="app">
@@ -34,9 +34,22 @@
 
     <main id="map" role="application" aria-label="Map"></main>
 
-    <button type="button" id="btnFollow" class="map-fab follow-fab active" title="Center on car / follow" aria-label="Center and follow" aria-pressed="true">
-      <span aria-hidden="true">⌖</span>
-    </button>
+    <section id="turnCard" class="turn-card hidden" aria-live="polite">
+      <div class="turn-icon" id="turnIcon" aria-hidden="true">↗</div>
+      <div class="turn-copy">
+        <strong id="turnDist">—</strong>
+        <span id="turnText">Set a route for turn guidance</span>
+      </div>
+    </section>
+
+    <div class="map-fabs">
+      <button type="button" id="btnHeading" class="map-fab heading-fab" title="Toggle north-up / heading-up" aria-label="Map orientation" aria-pressed="false">
+        <span id="headingFabLabel" aria-hidden="true">N</span>
+      </button>
+      <button type="button" id="btnFollow" class="map-fab follow-fab active" title="Center on car / follow" aria-label="Center and follow" aria-pressed="true">
+        <span aria-hidden="true">⌖</span>
+      </button>
+    </div>
 
     <section id="alertBanner" class="alert-banner hidden" aria-live="assertive">
       <div class="alert-pulse"></div>
@@ -207,6 +220,7 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script type="module" src="js/app.js?v=12"></script>
+  <script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.js"></script>
+  <script type="module" src="js/app.js?v=19"></script>
 </body>
 </html>

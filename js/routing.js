@@ -35,9 +35,64 @@ function parseOsrmRoutes(data) {
       distance: route.distance,
       duration: route.duration,
       points,
+      steps: flattenSteps(route),
       summary: routeLabel(route.distance, route.duration, i),
     };
   });
+}
+
+function flattenSteps(route) {
+  const steps = [];
+  for (const leg of route.legs || []) {
+    for (const step of leg.steps || []) {
+      const [lng, lat] = step.maneuver?.location || [];
+      const modifier = step.maneuver?.modifier || "";
+      const type = step.maneuver?.type || "";
+      steps.push({
+        lat,
+        lng,
+        name: step.name || "",
+        distance: step.distance || 0,
+        duration: step.duration || 0,
+        type,
+        modifier,
+        instruction: stepInstruction(type, modifier, step.name),
+      });
+    }
+  }
+  return steps;
+}
+
+function stepInstruction(type, modifier, name) {
+  const road = name ? ` onto ${name}` : "";
+  const mod = modifier ? ` ${modifier}` : "";
+  switch (type) {
+    case "depart":
+      return `Depart${road}`;
+    case "arrive":
+      return "Arrive at destination";
+    case "turn":
+      return `Turn${mod}${road}`;
+    case "new name":
+      return `Continue${road}`;
+    case "merge":
+      return `Merge${mod}${road}`;
+    case "ramp":
+      return `Take ramp${mod}${road}`;
+    case "fork":
+      return `Keep${mod}${road}`;
+    case "end of road":
+      return `At end of road, turn${mod}${road}`;
+    case "continue":
+      return `Continue${mod}${road}`;
+    case "roundabout":
+    case "rotary":
+      return `Enter roundabout${road}`;
+    case "notification":
+      return name || "Continue";
+    default:
+      return `${type || "Continue"}${mod}${road}`.trim();
+  }
 }
 
 /**
@@ -94,7 +149,7 @@ async function requestOsrm(origin, destination, vias, preferAlternatives) {
   const alt = preferAlternatives && vias.length === 0 ? "true" : "false";
   const url =
     `${OSRM_BASE}/route/v1/driving/${coords}` +
-    `?overview=full&geometries=geojson&alternatives=${alt}&steps=false&continue_straight=false`;
+    `?overview=full&geometries=geojson&alternatives=${alt}&steps=true&continue_straight=false`;
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Routing failed (${res.status})`);
@@ -122,9 +177,196 @@ export function straightRoute(origin, destination) {
       distance,
       duration,
       points,
+      steps: [
+        {
+          lat: origin.lat,
+          lng: origin.lng,
+          name: "",
+          distance,
+          duration,
+          type: "depart",
+          modifier: "",
+          instruction: "Head toward destination",
+        },
+        {
+          lat: destination.lat,
+          lng: destination.lng,
+          name: "",
+          distance: 0,
+          duration: 0,
+          type: "arrive",
+          modifier: "",
+          instruction: "Arrive at destination",
+        },
+      ],
       summary: `Direct path · ${formatDistance(distance)} · ~${Math.max(1, Math.round(duration / 60))} min`,
     },
   ];
+}
+
+/**
+ * Progress along a polyline: distance from start to the closest point on the path.
+ */
+export function progressAlongPolyline(point, polyline) {
+  if (!polyline?.length) return { alongM: 0, index: 0, distToPath: Infinity };
+  if (polyline.length === 1) {
+    return {
+      alongM: 0,
+      index: 0,
+      distToPath: haversine(point, polyline[0]),
+    };
+  }
+
+  let bestDist = Infinity;
+  let bestAlong = 0;
+  let bestIndex = 0;
+  let traveled = 0;
+
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const a = polyline[i];
+    const b = polyline[i + 1];
+    const segLen = haversine(a, b);
+    const { dist, t } = distanceToSegment(point, a, b);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestAlong = traveled + segLen * t;
+      bestIndex = i;
+    }
+    traveled += segLen;
+  }
+
+  return { alongM: bestAlong, index: bestIndex, distToPath: bestDist };
+}
+
+function distanceToSegment(p, a, b) {
+  const latToM = 111320;
+  const lngToM = 111320 * Math.cos((p.lat * Math.PI) / 180);
+  const ax = 0;
+  const ay = 0;
+  const bx = (b.lng - a.lng) * lngToM;
+  const by = (b.lat - a.lat) * latToM;
+  const px = (p.lng - a.lng) * lngToM;
+  const py = (p.lat - a.lat) * latToM;
+  const seg2 = bx * bx + by * by;
+  let t = seg2 <= 1e-6 ? 0 : (px * bx + py * by) / seg2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * bx;
+  const cy = ay + t * by;
+  const dist = Math.hypot(px - cx, py - cy);
+  return { dist, t };
+}
+
+/**
+ * Next upcoming turn based on distance-along-route (not nearest by crow-flies).
+ * Once you pass a maneuver, the next one is shown immediately.
+ */
+export function nextTurnFromSteps(position, steps, routePoints) {
+  if (!position || !steps?.length) return null;
+
+  const poly = routePoints?.length ? routePoints : steps.filter((s) => Number.isFinite(s.lat));
+  const progress = progressAlongPolyline(position, poly);
+  const PASS_BUFFER_M = 35; // consider a turn "passed" this far after it
+
+  const upcoming = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) continue;
+    if (s.type === "depart") continue;
+
+    const stepAlong = progressAlongPolyline(s, poly).alongM;
+    // Still ahead of us (or we're not yet past it)
+    if (stepAlong <= progress.alongM + PASS_BUFFER_M && s.type !== "arrive") {
+      continue;
+    }
+
+    // Skip tiny "continue" / rename noise
+    if (
+      (s.type === "continue" || s.type === "new name" || s.type === "notification") &&
+      (s.distance || 0) < 60 &&
+      s.type !== "arrive"
+    ) {
+      continue;
+    }
+
+    upcoming.push({
+      ...s,
+      index: i,
+      alongM: stepAlong,
+      distanceAway: Math.max(0, stepAlong - progress.alongM),
+    });
+  }
+
+  if (!upcoming.length) {
+    const last = steps[steps.length - 1];
+    if (!last || !Number.isFinite(last.lat)) return null;
+    const along = progressAlongPolyline(last, poly).alongM;
+    return {
+      ...last,
+      distanceAway: Math.max(0, along - progress.alongM),
+    };
+  }
+
+  upcoming.sort((a, b) => a.alongM - b.alongM);
+  return upcoming[0];
+}
+
+/** Point at distance `alongM` meters from the start of a polyline. */
+export function pointAlongPolyline(polyline, alongM) {
+  if (!polyline?.length) return null;
+  if (polyline.length === 1 || alongM <= 0) return { ...polyline[0] };
+  let acc = 0;
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const seg = haversine(polyline[i], polyline[i + 1]);
+    if (acc + seg >= alongM) {
+      const t = seg < 1e-6 ? 0 : (alongM - acc) / seg;
+      return {
+        lat: polyline[i].lat + (polyline[i + 1].lat - polyline[i].lat) * t,
+        lng: polyline[i].lng + (polyline[i + 1].lng - polyline[i].lng) * t,
+      };
+    }
+    acc += seg;
+  }
+  return { ...polyline[polyline.length - 1] };
+}
+
+/**
+ * Bearing (deg) parallel to the route under the car.
+ * Uses the segment the user is on (same direction as the drawn polyline).
+ */
+export function routeHeadingDegrees(position, routePoints, lookAheadM = 30) {
+  if (!position || !routePoints?.length || routePoints.length < 2) return null;
+  const { alongM, index, distToPath } = progressAlongPolyline(position, routePoints);
+  if (distToPath > 150) return null;
+
+  // Prefer the geometric segment underfoot — that is "parallel to the route"
+  let i = Math.max(0, Math.min(index, routePoints.length - 2));
+  while (i < routePoints.length - 2 && haversine(routePoints[i], routePoints[i + 1]) < 1.5) {
+    i += 1;
+  }
+  const a = routePoints[i];
+  const b = routePoints[i + 1];
+  if (a && b && haversine(a, b) >= 1.5) {
+    return bearingBetween(a, b);
+  }
+
+  // Fallback: short look-ahead along the path
+  const from = pointAlongPolyline(routePoints, Math.max(0, alongM));
+  const to = pointAlongPolyline(routePoints, alongM + lookAheadM);
+  if (!from || !to || haversine(from, to) < 1) return null;
+  return bearingBetween(from, to);
+}
+
+function bearingBetween(a, b) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const toDeg = (r) => (r * 180) / Math.PI;
+  const φ1 = toRad(a.lat);
+  const φ2 = toRad(b.lat);
+  const Δλ = toRad(b.lng - a.lng);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) -
+    Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
 
 function densify(points, segments) {

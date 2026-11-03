@@ -28,8 +28,16 @@ import {
   distanceToPolyline,
   nearestPolylineIndex,
   advanceAlongPolyline,
+  nextTurnFromSteps,
+  routeHeadingDegrees,
 } from "./routing.js";
 import { searchPlaces } from "./search.js";
+import {
+  startAlertLoop,
+  stopAlertLoop,
+  speak,
+  warmUpSpeech,
+} from "./audio.js";
 
 const DEFAULT_ALERT_KM = 2;
 const ROUTE_CAM_CORRIDOR_M = 800; // highway cams near LPT centerline
@@ -70,6 +78,8 @@ const el = {
   btnDest: document.getElementById("btnDest"),
   btnRoutes: document.getElementById("btnRoutes"),
   btnFollow: document.getElementById("btnFollow"),
+  btnHeading: document.getElementById("btnHeading"),
+  headingFabLabel: document.getElementById("headingFabLabel"),
   btnInstallMenu: document.getElementById("btnInstallMenu"),
   installHint: document.getElementById("installHint"),
   btnCacheRoute: document.getElementById("btnCacheRoute"),
@@ -84,6 +94,10 @@ const el = {
   recentList: document.getElementById("recentList"),
   demoSpeedBar: document.getElementById("demoSpeedBar"),
   demoSpeedLabel: document.getElementById("demoSpeedLabel"),
+  turnCard: document.getElementById("turnCard"),
+  turnDist: document.getElementById("turnDist"),
+  turnText: document.getElementById("turnText"),
+  turnIcon: document.getElementById("turnIcon"),
 };
 
 const state = {
@@ -107,9 +121,6 @@ const state = {
   alertRadiusM: DEFAULT_ALERT_KM * 1000,
   alertVolume: 0.7,
   alertSilenced: false,
-  alertActive: false,
-  audioCtx: null,
-  alertTimer: null,
   map: null,
   userMarker: null,
   camLayer: null,
@@ -129,7 +140,39 @@ const state = {
   targetZoom: null,
   lastZoomAt: 0,
   pendingRoute: null, // previewed but not confirmed
+  heading: 0, // target travel direction deg clockwise from north
+  displayHeading: 0, // smoothed travel direction
+  mapUp: 0, // geographic direction currently at top of screen
+  headingUp: false, // false = north-up, true = travel direction up
+  rotateSupported: false,
+  orientRaf: 0,
+  lastOrientTs: 0,
+  // Smooth follow: GPS/demo set targets; rAF lerps displayPos every frame
+  targetPos: null, // { lat, lng, t }
+  displayPos: null, // { lat, lng } rendered marker / map center
+  targetSpeed: 0,
+  pendingZoom: null,
+  voiceCamId: null,
+  voiceLevelsSaid: new Set(), // '100' | '50' | '25'
 };
+
+function normDeg(d) {
+  return ((d % 360) + 360) % 360;
+}
+
+function angleDelta(from, to) {
+  return ((to - from + 540) % 360) - 180;
+}
+
+/** leaflet-rotate: positive bearing rotates map clockwise; heading-up needs the negation. */
+function applyMapBearing(travelUpDeg) {
+  if (!state.rotateSupported || !state.map?.setBearing) return;
+  try {
+    state.map.setBearing(normDeg(-travelUpDeg));
+  } catch {
+    /* ignore */
+  }
+}
 
 function setStatus(text) {
   el.status.textContent = text;
@@ -150,13 +193,53 @@ function camIcon() {
   });
 }
 
+/**
+ * Arrow tip follows travel direction on screen.
+ * mapUp = which geographic direction is currently at the top of the screen.
+ * Heading-up synced → mapUp ≈ displayHeading → tip points straight up.
+ */
+function arrowScreenRotation() {
+  return normDeg(state.displayHeading - state.mapUp);
+}
+
+function activeRoutePoints() {
+  if (state.selectedRoute?.points?.length >= 2) return state.selectedRoute.points;
+  if (state.demoPath?.length >= 2) return state.demoPath;
+  if (state.routePoints?.length >= 2) return state.routePoints;
+  return null;
+}
+
 function userIcon() {
+  const rot = arrowScreenRotation();
   return L.divIcon({
-    className: "",
-    html: '<div class="user-marker"></div>',
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    className: "user-marker-icon",
+    html: `<div class="user-marker">
+      <span class="user-pulse" aria-hidden="true"></span>
+      <div class="user-arrow-wrap" style="transform:rotate(${rot}deg)">
+        <svg class="user-nav" viewBox="0 0 72 72" aria-hidden="true">
+          <defs>
+            <linearGradient id="navFill" x1="36" y1="4" x2="36" y2="66" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#ffb020"/>
+              <stop offset="100%" stop-color="#e07800"/>
+            </linearGradient>
+          </defs>
+          <path class="nav-shadow" d="M36 6 L64 62 L36 48 L8 62 Z"/>
+          <path class="nav-body" d="M36 4 L62 58 L36 44 L10 58 Z"/>
+          <path class="nav-cut" d="M36 22 L48 50 L36 42 L24 50 Z"/>
+        </svg>
+      </div>
+    </div>`,
+    iconSize: [64, 64],
+    iconAnchor: [32, 32],
   });
+}
+
+function syncArrowDom() {
+  const root = state.userMarker?.getElement?.() || state.userMarker?._icon;
+  const wrap = root?.querySelector?.(".user-arrow-wrap");
+  if (wrap) {
+    wrap.style.transform = `rotate(${arrowScreenRotation()}deg)`;
+  }
 }
 
 function destIcon() {
@@ -169,12 +252,21 @@ function destIcon() {
 }
 
 function initMap() {
-  state.map = L.map("map", {
+  state.rotateSupported = typeof L.Map.prototype.setBearing === "function";
+  const mapOpts = {
     zoomControl: false,
     attributionControl: true,
     zoomSnap: 0.25,
     zoomDelta: 0.5,
-  }).setView([4.2, 103.1], 8);
+  };
+  if (state.rotateSupported) {
+    mapOpts.rotate = true;
+    mapOpts.bearing = 0;
+    mapOpts.touchRotate = false;
+    mapOpts.rotateControl = false;
+  }
+
+  state.map = L.map("map", mapOpts).setView([4.2, 103.1], 8);
 
   L.control.zoom({ position: "bottomright" }).addTo(state.map);
 
@@ -201,9 +293,16 @@ function setFollow(on, recenter = true) {
     state.suppressFollowUntil = Date.now() + 400;
     const zoom = zoomForSpeed(state.position.speed);
     state.targetZoom = zoom;
+    state.pendingZoom = zoom;
     state.lastZoomAt = Date.now();
+    state.displayPos = { lat: state.position.lat, lng: state.position.lng };
+    state.targetPos = {
+      lat: state.position.lat,
+      lng: state.position.lng,
+      t: Date.now(),
+    };
     state.map.setView([state.position.lat, state.position.lng], zoom, {
-      animate: true,
+      animate: false,
     });
   }
 }
@@ -592,10 +691,12 @@ function selectRoute(route, opts = {}) {
     duration: route.duration,
     summary: route.summary,
     points: persistPts,
+    steps: route.steps || [],
   });
   setMeta("destination", state.destination);
   renderRouteCameras();
   updateHud();
+  if (state.position) updateTurnCard(state.position);
 }
 
 /** Cameras within corridor of the selected route, ordered along the path. */
@@ -703,6 +804,7 @@ function clearNavigation() {
   setMeta("selectedRoute", null);
   setDestMode(false);
   renderRouteCameras();
+  el.turnCard.classList.add("hidden");
 }
 
 function drawCorridor(fit = true) {
@@ -744,15 +846,26 @@ function drawCorridor(fit = true) {
 }
 
 function updateUserMarker(pos) {
-  const latlng = [pos.lat, pos.lng];
+  // Only update targets — rAF loop smoothly moves marker + map (~60fps)
+  state.targetPos = {
+    lat: pos.lat,
+    lng: pos.lng,
+    t: pos.t ?? Date.now(),
+  };
+  state.targetSpeed = pos.speed || 0;
+
+  if (!state.displayPos) {
+    state.displayPos = { lat: pos.lat, lng: pos.lng };
+  }
+
+  const latlng = [state.displayPos.lat, state.displayPos.lng];
   if (!state.userMarker) {
     state.userMarker = L.marker(latlng, {
       icon: userIcon(),
       zIndexOffset: 1000,
     }).addTo(state.map);
-  } else {
-    state.userMarker.setLatLng(latlng);
   }
+
   if (pos.accuracy && pos.accuracy < 200) {
     if (!state.accuracyCircle) {
       state.accuracyCircle = L.circle(latlng, {
@@ -762,7 +875,6 @@ function updateUserMarker(pos) {
         fillOpacity: 0.08,
       }).addTo(state.map);
     } else {
-      state.accuracyCircle.setLatLng(latlng);
       state.accuracyCircle.setRadius(pos.accuracy);
     }
   }
@@ -773,17 +885,140 @@ function updateUserMarker(pos) {
     const now = Date.now();
     const prev = state.targetZoom;
     const zoomChanged = prev == null || Math.abs(zoom - prev) >= 0.25;
-    // Zoom in quickly when slowing (intersections); zoom out more gently
     const zoomingIn = prev != null && zoom > prev;
-    const throttleMs = zoomingIn ? 700 : 1400;
+    const throttleMs = zoomingIn ? 900 : 1600;
     if (zoomChanged && now - state.lastZoomAt > throttleMs) {
       state.targetZoom = zoom;
+      state.pendingZoom = zoom;
       state.lastZoomAt = now;
-      state.map.setView(latlng, zoom, { animate: true, duration: zoomingIn ? 0.45 : 0.7 });
-    } else {
-      state.map.panTo(latlng, { animate: true, duration: 0.35 });
     }
   }
+}
+
+function smoothDisplayPos(dt) {
+  if (!state.targetPos) return null;
+
+  // Dead-reckon a little between sparse GPS/demo ticks so motion stays continuous
+  const ageSec = Math.max(0, (Date.now() - (state.targetPos.t || Date.now())) / 1000);
+  let goal = { lat: state.targetPos.lat, lng: state.targetPos.lng };
+  if (state.targetSpeed > 0.8 && ageSec > 0.02 && ageSec < 1.2) {
+    goal = destinationPoint(
+      state.targetPos,
+      state.displayHeading,
+      state.targetSpeed * Math.min(ageSec, 0.7)
+    );
+  }
+
+  if (!state.displayPos) {
+    state.displayPos = { lat: goal.lat, lng: goal.lng };
+    return state.displayPos;
+  }
+
+  const gap = distanceMeters(state.displayPos, goal);
+  if (gap > 90) {
+    // Teleport / first lock — snap
+    state.displayPos = { lat: goal.lat, lng: goal.lng };
+    return state.displayPos;
+  }
+
+  // Exponential ease (~180ms time-constant) → smooth 60fps glide
+  const alpha = 1 - Math.exp(-dt / 0.18);
+  state.displayPos = {
+    lat: state.displayPos.lat + (goal.lat - state.displayPos.lat) * alpha,
+    lng: state.displayPos.lng + (goal.lng - state.displayPos.lng) * alpha,
+  };
+  return state.displayPos;
+}
+
+function startOrientationLoop() {
+  if (state.orientRaf) return;
+  state.lastOrientTs = performance.now();
+
+  const tick = (now) => {
+    state.orientRaf = requestAnimationFrame(tick);
+    const dt = Math.min(0.05, Math.max(0.001, (now - state.lastOrientTs) / 1000));
+    state.lastOrientTs = now;
+
+    // Smooth travel heading
+    const hDelta = angleDelta(state.displayHeading, state.heading);
+    if (Math.abs(hDelta) > 40) {
+      state.displayHeading = normDeg(state.heading);
+    } else if (Math.abs(hDelta) > 0.15) {
+      const step =
+        Math.sign(hDelta) *
+        Math.min(Math.abs(hDelta) * Math.min(1, 12 * dt), 200 * dt);
+      state.displayHeading = normDeg(state.displayHeading + step);
+    }
+
+    // mapUp = geographic dir at top of screen (0 = north-up)
+    const upTarget = state.headingUp ? state.displayHeading : 0;
+    const upDelta = angleDelta(state.mapUp, upTarget);
+    if (Math.abs(upDelta) > 40) {
+      state.mapUp = normDeg(upTarget);
+      applyMapBearing(state.mapUp);
+    } else if (Math.abs(upDelta) > 0.2) {
+      const maxRate = Math.abs(upDelta) > 60 ? 40 : 65; // deg/s
+      const step =
+        Math.sign(upDelta) *
+        Math.min(Math.abs(upDelta) * Math.min(1, 4 * dt), maxRate * dt);
+      state.mapUp = normDeg(state.mapUp + step);
+      applyMapBearing(state.mapUp);
+    } else if (!state.headingUp && Math.abs(state.mapUp) > 0.01) {
+      state.mapUp = 0;
+      applyMapBearing(0);
+    }
+
+    const pos = smoothDisplayPos(dt);
+    if (pos) {
+      if (state.userMarker) {
+        state.userMarker.setLatLng([pos.lat, pos.lng]);
+      }
+      if (state.accuracyCircle) {
+        state.accuracyCircle.setLatLng([pos.lat, pos.lng]);
+      }
+
+      if (state.follow) {
+        state.suppressFollowUntil = Date.now() + 200;
+        const zoom =
+          state.pendingZoom != null
+            ? state.pendingZoom
+            : state.map.getZoom();
+        if (state.pendingZoom != null) {
+          state.map.setView([pos.lat, pos.lng], zoom, { animate: false });
+          state.pendingZoom = null;
+        } else {
+          // Instant pan every frame — looks like high refresh, no Leaflet tween jumps
+          state.map.panTo([pos.lat, pos.lng], {
+            animate: false,
+            noMoveStart: true,
+          });
+        }
+      }
+    }
+
+    syncArrowDom();
+  };
+
+  state.orientRaf = requestAnimationFrame(tick);
+}
+
+function setHeadingUp(on) {
+  state.headingUp = on;
+  el.btnHeading.classList.toggle("active", on);
+  el.btnHeading.setAttribute("aria-pressed", on ? "true" : "false");
+  el.headingFabLabel.textContent = on ? "⬆" : "N";
+  el.btnHeading.title = on
+    ? "Heading up — map follows car (tap for north up)"
+    : "North up (tap for heading up)";
+  if (!state.rotateSupported && on) {
+    el.hint.textContent =
+      "Map rotate plugin unavailable — arrow still shows direction. Try a hard refresh.";
+  }
+  // Snap map orientation on toggle so it isn't confusing mid-turn
+  state.mapUp = on ? state.displayHeading : 0;
+  applyMapBearing(state.mapUp);
+  syncArrowDom();
+  setMeta("headingUp", on);
 }
 
 /**
@@ -832,8 +1067,69 @@ function applyPosition(fix, reportedSpeed = null) {
     t: fix.t ?? Date.now(),
     accuracy: fix.accuracy,
     speed: 0,
+    heading: fix.heading,
   };
   next.speed = estimateSpeed(state.position, next, reportedSpeed);
+
+  // Travel direction = where the car is actually moving (Waze-style).
+  // Route bearing is only a fallback when nearly stopped — and must agree
+  // with recent motion, otherwise it points the wrong way along the road.
+  let moveHdg = null;
+  if (state.position) {
+    const moved = distanceMeters(state.position, next);
+    if (moved >= 2) {
+      moveHdg = bearingDegrees(state.position, next);
+    }
+  }
+  const gpsHdg =
+    typeof fix.heading === "number" &&
+    Number.isFinite(fix.heading) &&
+    next.speed > 1.2
+      ? normDeg(fix.heading)
+      : null;
+
+  const routePts = activeRoutePoints();
+  let routeHdg =
+    routePts?.length >= 2 ? routeHeadingDegrees(next, routePts, 25) : null;
+  if (
+    routeHdg != null &&
+    state.heading != null &&
+    Math.abs(angleDelta(state.heading, routeHdg)) > 90
+  ) {
+    // Polyline order opposite to travel — flip so arrow stays parallel to driving
+    routeHdg = normDeg(routeHdg + 180);
+  }
+
+  let newHdg = null;
+  if (moveHdg != null && next.speed > 1.0) {
+    if (
+      routeHdg != null &&
+      Math.abs(angleDelta(moveHdg, routeHdg)) <= 75
+    ) {
+      newHdg = routeHdg; // on-route: stable road-parallel heading
+    } else {
+      newHdg = moveHdg; // trust real motion
+    }
+  } else if (gpsHdg != null) {
+    newHdg = gpsHdg;
+  } else if (routeHdg != null) {
+    newHdg = routeHdg;
+  } else if (moveHdg != null) {
+    newHdg = moveHdg;
+  }
+
+  if (newHdg != null && Number.isFinite(newHdg)) {
+    state.heading = normDeg(newHdg);
+    if (Math.abs(angleDelta(state.displayHeading, state.heading)) > 40) {
+      state.displayHeading = state.heading;
+      if (state.headingUp) {
+        state.mapUp = state.displayHeading;
+        applyMapBearing(state.mapUp);
+      }
+      syncArrowDom();
+    }
+  }
+
   state.prevPosition = state.position;
   state.position = next;
 
@@ -842,6 +1138,7 @@ function applyPosition(fix, reportedSpeed = null) {
 
   updateUserMarker(next);
   updateHud();
+  updateTurnCard(next);
   maybeReroute(next);
 }
 
@@ -927,6 +1224,7 @@ function updateHud() {
     setProximity(0, "far");
     hideAlertBanner();
     stopAlertSound();
+    resetVoiceAlerts();
     el.proximityLabel.textContent = state.cameras.length
       ? "Waiting for GPS…"
       : "No cameras loaded";
@@ -951,12 +1249,69 @@ function updateHud() {
     el.alertTitle.textContent = `AWAS ahead — ${nearest.cam.name || "camera"}`;
     el.alertSub.textContent = `${formatDistance(d)} · ETA ${formatEta(d, pos.speed)} · ${formatSpeed(pos.speed)}`;
     if (!state.alertSilenced) startAlertSound();
+    maybeSpeakApproach(nearest.cam.id, d, radius);
   } else {
-    // Left the zone — allow future alerts again
     state.alertSilenced = false;
     hideAlertBanner();
     stopAlertSound();
+    resetVoiceAlerts();
   }
+}
+
+function resetVoiceAlerts() {
+  state.voiceCamId = null;
+  state.voiceLevelsSaid = new Set();
+}
+
+function maybeSpeakApproach(camId, distanceM, radiusM) {
+  if (state.alertSilenced) return;
+  if (state.voiceCamId !== camId) {
+    state.voiceCamId = camId;
+    state.voiceLevelsSaid = new Set();
+  }
+  const levels = [
+    { key: "100", at: radiusM },
+    { key: "50", at: radiusM * 0.5 },
+    { key: "25", at: radiusM * 0.25 },
+  ];
+  for (const level of levels) {
+    if (distanceM <= level.at && !state.voiceLevelsSaid.has(level.key)) {
+      state.voiceLevelsSaid.add(level.key);
+      speak("Approaching Speed Camera", Math.max(0.5, state.alertVolume));
+      break; // one announcement per position update
+    }
+  }
+}
+
+function turnIconForStep(step) {
+  const m = `${step?.type || ""} ${step?.modifier || ""}`.toLowerCase();
+  if (m.includes("arrive")) return "🏁";
+  if (m.includes("left") && m.includes("sharp")) return "↰";
+  if (m.includes("right") && m.includes("sharp")) return "↱";
+  if (m.includes("left")) return "⬅";
+  if (m.includes("right")) return "➡";
+  if (m.includes("uturn") || m.includes("u-turn")) return "↩";
+  if (m.includes("roundabout") || m.includes("rotary")) return "↻";
+  if (m.includes("merge") || m.includes("ramp") || m.includes("fork")) return "↗";
+  return "⬆";
+}
+
+function updateTurnCard(pos) {
+  const steps = state.selectedRoute?.steps;
+  const routePts = state.selectedRoute?.points;
+  if (!pos || !steps?.length) {
+    el.turnCard.classList.add("hidden");
+    return;
+  }
+  const next = nextTurnFromSteps(pos, steps, routePts);
+  if (!next) {
+    el.turnCard.classList.add("hidden");
+    return;
+  }
+  el.turnCard.classList.remove("hidden");
+  el.turnDist.textContent = formatDistance(next.distanceAway);
+  el.turnText.textContent = next.instruction || "Continue";
+  el.turnIcon.textContent = turnIconForStep(next);
 }
 
 function hideAlertBanner() {
@@ -974,67 +1329,32 @@ function setProximity(closeness01, level) {
   el.proximityPct.textContent = `${pct}%`;
 }
 
-function getAudioCtx() {
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return null;
-  if (!state.audioCtx) state.audioCtx = new Ctx();
-  if (state.audioCtx.state === "suspended") state.audioCtx.resume();
-  return state.audioCtx;
-}
-
-function playAlertChirp() {
-  if (state.alertVolume <= 0) return;
-  try {
-    const ctx = getAudioCtx();
-    if (!ctx) return;
-    const now = ctx.currentTime;
-    const gain = ctx.createGain();
-    const osc = ctx.createOscillator();
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(880, now);
-    osc.frequency.setValueAtTime(660, now + 0.12);
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(
-      Math.max(0.001, state.alertVolume * 0.22),
-      now + 0.02
-    );
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.3);
-  } catch {
-    /* ignore */
-  }
-}
-
 function startAlertSound() {
-  if (state.alertActive || state.alertSilenced) return;
-  if (state.alertVolume <= 0) return;
-  state.alertActive = true;
-  playAlertChirp();
-  state.alertTimer = setInterval(playAlertChirp, 650);
+  if (state.alertSilenced) return;
+  startAlertLoop(state.alertVolume);
 }
 
 function stopAlertSound() {
-  if (state.alertTimer) {
-    clearInterval(state.alertTimer);
-    state.alertTimer = null;
-  }
-  state.alertActive = false;
+  stopAlertLoop();
 }
 
 function applyVolume() {
-  // Volume applied on next chirp; restart loop if already alerting
-  if (state.alertActive && !state.alertSilenced) {
-    stopAlertSound();
-    if (state.alertVolume > 0) startAlertSound();
+  if (state.alertSilenced) return;
+  // Restart loop so new volume applies; uses soft transient chirps
+  stopAlertLoop();
+  // Only restart if still inside alert zone
+  if (state.position && state.cameras.length) {
+    const nearest = pickNearestRelevant(state.position);
+    if (nearest && nearest.distance <= state.alertRadiusM && state.alertVolume > 0) {
+      startAlertLoop(state.alertVolume);
+    }
   }
 }
 
 function userStopAlert() {
   state.alertSilenced = true;
   stopAlertSound();
+  if (window.speechSynthesis) speechSynthesis.cancel();
   el.hint.textContent = "Alert silenced until you leave the zone.";
 }
 
@@ -1061,6 +1381,10 @@ function startTracking() {
           lng: pos.coords.longitude,
           t: pos.timestamp,
           accuracy: pos.coords.accuracy,
+          heading:
+            typeof pos.coords.heading === "number" && !Number.isNaN(pos.coords.heading)
+              ? pos.coords.heading
+              : null,
         },
         pos.coords.speed
       );
@@ -1077,7 +1401,7 @@ function startTracking() {
     },
     {
       enableHighAccuracy: true,
-      maximumAge: 1000,
+      maximumAge: 250,
       timeout: 15000,
     }
   );
@@ -1174,7 +1498,7 @@ async function startDemo() {
   state.map.setView([pos.lat, pos.lng], 14);
   applyPosition(pos, demoSpeedMps());
 
-  const tickMs = 250;
+  const tickMs = 100;
   state.demoTimer = setInterval(() => {
     const poly = state.demoPath;
     if (!poly || poly.length < 2) {
@@ -1231,7 +1555,7 @@ function startDemoTowardCamera() {
     demoSpeedMps()
   );
 
-  const tickMs = 250;
+  const tickMs = 100;
   state.demoTimer = setInterval(() => {
     if (!state.demoPos) return;
     const nearest = nearestCamera(state.demoPos, state.cameras);
@@ -1395,6 +1719,7 @@ function wireUi() {
   el.scrim.addEventListener("click", () => openDrawer(false));
 
   el.btnFollow.addEventListener("click", () => centerOnCar());
+  el.btnHeading.addEventListener("click", () => setHeadingUp(!state.headingUp));
 
   el.btnDest.addEventListener("click", () => setDestMode(!state.destMode));
   el.btnRoutes.addEventListener("click", () => openRoutesPanel());
@@ -1553,6 +1878,7 @@ function wireUi() {
 
 async function boot() {
   initMap();
+  startOrientationLoop();
   wireUi();
   registerServiceWorker();
   setFollow(true, false);
@@ -1593,6 +1919,9 @@ async function boot() {
   const recent = await getMeta("recentSearches", []);
   state.recentSearches = Array.isArray(recent) ? recent : [];
 
+  const headingUp = await getMeta("headingUp", false);
+  setHeadingUp(!!headingUp);
+
   const route = await getMeta("route", []);
   if (Array.isArray(route) && route.length) {
     state.routePoints = route;
@@ -1630,6 +1959,7 @@ async function boot() {
   startTracking();
   setupWakeLock();
   setupBackButton();
+  warmUpSpeech();
 }
 
 /** Keep the web app open on Android/browser Back — close panels first, never exit. */
